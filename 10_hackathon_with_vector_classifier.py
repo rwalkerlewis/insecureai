@@ -1,16 +1,141 @@
 """
-Module 10: Hackathon Interactive Chat
-Learn: Interactive Q&A with the model
+Module 8: Hackathon Interactive Chat with LLM-Based Classification
+Learn: Interactive Q&A with the model, enhanced with LLM-based prompt screening
 """
 
 from llama_cpp import Llama
 from config import MODEL_PATH, check_model_exists
 import numpy as np
 import re
+from typing import Dict
 
-OLLAMA_API = "http://localhost:11434/api/embeddings"
-EMBEDDING_MODEL = "nomic-embed-text"  # Fast and efficient embedding model
+# ============================================================================
+# LLM-BASED CLASSIFICATION (adapted from Module 09 approach)
+# ============================================================================
 
+class LLMClassifier:
+    """
+    Classify prompts using the LLM directly instead of embeddings
+    This is faster and doesn't require Ollama API
+    """
+    
+    def __init__(self, categories: Dict[str, str], llm: Llama):
+        """
+        Initialize classifier with categories
+        
+        Args:
+            categories: Dict mapping category names to descriptions
+            llm: Llama model instance to use for classification
+        """
+        self.categories = categories
+        self.llm = llm
+        
+        print(f"🔄 Initializing LLM-based Classifier with {len(categories)} categories...")
+        print(f"✅ Classifier ready\n")
+    
+    def classify(self, prompt: str) -> Dict:
+        """
+        Classify a prompt using LLM to determine which category it belongs to
+        
+        Args:
+            prompt: Input text to classify
+            
+        Returns:
+            Dictionary with classification results including category and confidence
+        """
+        # Build simplified classification prompt
+        category_list = "\n".join([f"{i+1}. {name}" 
+                                   for i, name in enumerate(self.categories.keys())])
+        
+        classification_prompt = f"""Classify this question into ONE category:
+
+{category_list}
+
+Question: {prompt}
+
+Category name:"""
+        
+        # Get classification from LLM
+        response = self.llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": "You are a precise classifier. Respond with only the category name."},
+                {"role": "user", "content": classification_prompt}
+            ],
+            max_tokens=10,  # Reduced from 30
+            temperature=0.0,  # Deterministic for speed
+            logprobs=True,
+            top_logprobs=5
+        )
+        
+        category_response = response['choices'][0]['message']['content'].strip().lower()
+        
+        # Extract confidence from first token probability
+        confidence = 0.5  # default
+        logprobs_data = response['choices'][0].get('logprobs', {})
+        if logprobs_data and 'content' in logprobs_data:
+            first_tokens = logprobs_data['content'][:2]  # First 2 tokens only
+            probs = [np.exp(t['logprob']) for t in first_tokens if t and 'logprob' in t]
+            if probs:
+                confidence = np.mean(probs)
+        
+        # Match to actual category name
+        matched_category = None
+        for cat_name in self.categories.keys():
+            if cat_name in category_response or category_response in cat_name:
+                matched_category = cat_name
+                break
+        
+        # If no match found, use pattern matching on response
+        if not matched_category:
+            if any(word in category_response for word in ['fact', 'historical', 'definition', 'math']):
+                matched_category = 'safe-factual'
+            elif any(word in category_response for word in ['how', 'instruction', 'tutorial']):
+                matched_category = 'safe-instructional'
+            elif any(word in category_response for word in ['current', 'today', 'now', 'latest']):
+                matched_category = 'risky-temporal'
+            elif any(word in category_response for word in ['future', 'will', 'predict']):
+                matched_category = 'risky-future'
+            elif any(word in category_response for word in ['personal', 'private', 'password']):
+                matched_category = 'risky-personal'
+            elif any(word in category_response for word in ['creative', 'story', 'poem']):
+                matched_category = 'risky-creative'
+            elif any(word in category_response for word in ['opinion', 'subjective', 'prefer']):
+                matched_category = 'risky-opinion'
+            elif any(word in category_response for word in ['random', 'choice']):
+                matched_category = 'risky-random'
+            else:
+                matched_category = 'safe-factual'  # default fallback
+        
+        return {
+            'category': matched_category,
+            'confidence': confidence,
+            'raw_response': category_response
+        }
+
+
+# Define screening categories for prompt classification
+SCREENING_CATEGORIES = {
+    "safe-factual": "factual questions with objective answers that can be verified, historical facts, definitions, scientific facts, mathematical calculations",
+    
+    "safe-instructional": "how-to questions asking for step-by-step instructions, tutorials, explanations of processes and methods",
+    
+    "risky-temporal": "questions asking about current events, real-time information, today's weather, current stock prices, latest news that require up-to-date data",
+    
+    "risky-future": "questions about future events, predictions, what will happen next, forecasting future outcomes",
+    
+    "risky-personal": "questions asking for personal private information, user's name, address, password, or other confidential data",
+    
+    "risky-creative": "creative writing requests, storytelling, poetry, jokes, fictional narratives with infinite valid outputs",
+    
+    "risky-opinion": "subjective questions asking for opinions, preferences, recommendations, value judgments with no objective answer",
+    
+    "risky-random": "requests for random selections, arbitrary choices, random number generation"
+}
+
+
+# ============================================================================
+# UNCERTAINTY ANALYSIS (from Module 08)
+# ============================================================================
 
 def categorize_question_uncertainty(question):
     """
@@ -226,7 +351,7 @@ Your response:"""
             {"role": "system", "content": "You are an expert in uncertainty quantification and statistical analysis. Be precise and objective."},
             {"role": "user", "content": categorization_prompt}
         ],
-        max_tokens=300,
+        max_tokens=200,  # Reduced from 300
         temperature=temperature
     )
     
@@ -316,7 +441,7 @@ Your clarifying questions:"""
             {"role": "system", "content": "You are a helpful assistant that generates precise clarifying questions to improve answer quality."},
             {"role": "user", "content": clarification_prompt}
         ],
-        max_tokens=200,
+        max_tokens=100,  # Reduced from 200
         temperature=temperature
     )
     
@@ -388,7 +513,7 @@ Your response:"""
             {"role": "system", "content": "You are an honest AI assistant. Accurately assess your own knowledge limitations."},
             {"role": "user", "content": knowledge_check_prompt}
         ],
-        max_tokens=50,
+        max_tokens=20,  # Reduced from 50
         temperature=temperature,
         logprobs=True,
         top_logprobs=5
@@ -571,58 +696,99 @@ def analyze_uncertainty(logprobs_data, num_samples=5):
     }
 
 def main():
-    print("=== Module 8: Hackathon Interactive Chat ===\n")
+    print("=== Module 8: Hackathon Interactive Chat with LLM Classification ===\n")
 
     check_model_exists()
-    llm = Llama(model_path=str(MODEL_PATH), n_ctx=2**15, verbose=False, logits_all=True)
+    llm = Llama(model_path=str(MODEL_PATH), n_ctx=2048, verbose=False, logits_all=True)
 
-    # Default generation parameters
+    # Initialize the LLM-based classifier for initial screening
+    print("Initializing LLM-based prompt classifier...\n")
+    try:
+        classifier = LLMClassifier(SCREENING_CATEGORIES, llm)
+    except Exception as e:
+        print(f"⚠️  Warning: Could not initialize classifier: {e}")
+        print("Proceeding without classification...\n")
+        classifier = None
+
+    # Default generation parameters (optimized for speed)
     temperature = 0.7
     top_p = 0.95
-    max_tokens = 250
+    max_tokens = 100  # Reduced from 250 for faster generation
     
-    # Test prompts ordered from LESS random to MORE random
-    # This demonstrates increasing levels of uncertainty
+    # Test prompts - reduced set for faster testing
     test_prompts = [
-        # Very low uncertainty - simple factual questions
+        # Low uncertainty - simple factual
         "What is the capital of France?",
-        "What is 2 + 2?",
         
-        # Low-moderate uncertainty - requires specific knowledge
-        "What was the landing site for the Apollo 11 mission?",
-        "Who wrote the novel '1984'?",
-        
-        # Moderate uncertainty - some ambiguity or context needed
+        # Moderate uncertainty - requires knowledge
         "What is the best programming language?",
-        "How does quantum computing work?",
         
-        # Higher uncertainty - temporal, contextual, or under-specified
-        "What is the weather like?",
-        "Who is the president?",
+        # Temporal uncertainty - requires current date/time context
+        "Who is the president now?",
         
-        # Very high epistemic uncertainty - unknowable
+        # High epistemic uncertainty - unknowable
         "What is the weather in Los Angeles today?",
-        "What will the stock market do tomorrow?",
         
-        # Very high aleatoric uncertainty - creative/subjective
+        # High aleatoric uncertainty - creative
         "Tell me a story about a dragon",
-        "What's your favorite color?",
     ]
     
     print("Running analysis on multiple prompts (ordered by increasing uncertainty)...\n")
-    print("="*60)
+    print("="*70)
     
     for idx, prompt in enumerate(test_prompts, 1):
-        print("\n" + "#"*60)
+        print("\n" + "#"*70)
         print(f"# TEST {idx}/{len(test_prompts)}")
-        print("#"*60)
+        print("#"*70)
         
         # Ask the specific question
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print(f"Question: {prompt}")
-        print("="*60 + "\n")
+        print("="*70 + "\n")
 
-        # STEP 0: PRE-PROCESSING - Categorize question uncertainty BEFORE running model
+        # STEP 0A: LLM CLASSIFICATION - Screen with LLM classifier first
+        if classifier:
+            print("🔍 LLM CLASSIFICATION SCREENING\n")
+            llm_result = classifier.classify(prompt)
+            print(f"Primary Category: {llm_result['category']}")
+            print(f"Confidence: {llm_result['confidence']:.3f}")
+            print(f"Raw Response: {llm_result['raw_response']}\n")
+            
+            # Determine if we should proceed based on category
+            category = llm_result['category']
+            proceed_with_generation = True
+            warning_message = None
+            
+            if category.startswith('risky-'):
+                risk_type = category.replace('risky-', '')
+                if risk_type in ['temporal', 'future', 'personal']:
+                    proceed_with_generation = False
+                    warning_message = f"⚠️  High epistemic uncertainty detected via LLM classification ({risk_type})"
+                elif risk_type in ['creative', 'opinion', 'random']:
+                    warning_message = f"⚠️  High aleatoric uncertainty detected via LLM classification ({risk_type})"
+            
+            if warning_message:
+                print(f"\n{warning_message}")
+            
+            if not proceed_with_generation:
+                print("\n" + "="*70)
+                print("⚠️  EXECUTION STOPPED - LLM CLASSIFIER FLAGGED AS RISKY")
+                print("="*70 + "\n")
+                print("The LLM classifier identified this prompt as requiring:")
+                if 'temporal' in category:
+                    print("  • Real-time or current information")
+                elif 'future' in category:
+                    print("  • Prediction of future events")
+                elif 'personal' in category:
+                    print("  • Private personal information")
+                print("\nThese questions have maximum epistemic uncertainty.")
+                print("Model output would be fabricated/hallucinated.\n")
+                print("="*70)
+                continue
+            
+            print("\n" + "="*70)
+
+        # STEP 0B: PATTERN-BASED UNCERTAINTY CHECK
         uncertainty_category = categorize_question_uncertainty(prompt)
         
         print(f"📋 Question Category: {uncertainty_category['category']}")
@@ -630,9 +796,9 @@ def main():
         
         if not uncertainty_category['should_run']:
             # Maximum uncertainty detected - stop here
-            print("\n" + "="*60)
+            print("\n" + "="*70)
             print("⚠️  EXECUTION STOPPED - MAXIMUM UNCERTAINTY")
-            print("="*60 + "\n")
+            print("="*70 + "\n")
             
             print(f"{uncertainty_category['explanation']}\n")
             
@@ -646,9 +812,9 @@ def main():
                 print("   Infinite valid answers exist (inherent to creative/subjective tasks)")
                 print("   Every run produces different but equally valid results\n")
             
-            print("="*60)
+            print("="*70)
             print("RECOMMENDATION")
-            print("="*60)
+            print("="*70)
             
             if uncertainty_category['epistemic_max']:
                 print("\n✗ DO NOT USE MODEL OUTPUT - it would be fabricated")
@@ -661,7 +827,7 @@ def main():
                 print("\n✓ Appropriate for creative/brainstorming tasks")
                 print("✗ Not appropriate for factual answers or benchmarking")
             
-            print("\n" + "="*60)
+            print("\n" + "="*70)
             continue  # Skip to next prompt
         
         # Question is answerable - proceed with normal flow
@@ -697,9 +863,9 @@ def main():
             print("\n⚠️  WARNING: Insufficient knowledge - treat answer with caution\n")
         
         # STEP 2: Generate response with logprobs to get probability information
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("ANSWER")
-        print("="*60 + "\n")
+        print("="*70 + "\n")
         
         response = llm.create_chat_completion(
             messages=[
@@ -734,9 +900,9 @@ def main():
                     min_prob = np.min(token_probs)
                     max_prob = np.max(token_probs)
                     
-                    print("\n" + "="*60)
+                    print("\n" + "="*70)
                     print(f"CONFIDENCE: Avg {avg_prob*100:.1f}% | Min {min_prob*100:.1f}% | Max {max_prob*100:.1f}%")
-                    print("="*60)
+                    print("="*70)
                 
                 uncertainty_analysis = analyze_uncertainty(logprobs_data)
                 
@@ -776,9 +942,9 @@ def main():
                 else:
                     print("✓ None needed")
                 
-                print("\n" + "="*60)
+                print("\n" + "="*70)
                 print("CONFIDENCE BREAKDOWN")
-                print("="*60)
+                print("="*70)
                 
                 token_variance = np.var(token_probs)
                 aleatoric_grade, aleatoric_desc = grade_component(uncertainty_analysis['aleatoric_mean'], 0.5, 2.0)
@@ -827,14 +993,14 @@ def main():
                 status_map = {'A': '✓ HIGH', 'B': '✓ HIGH', 'C': '~ MODERATE', 'D': '⚠ LOW', 'F': '⚠ LOW'}
                 print(f"\n{status_map[overall_grade]} RELIABILITY | Grade: {overall_grade} | Score: {reliability_score:.0f}%")
     
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("\nNow entering interactive mode...")
     print("\nCommands:")
     print("  - Type 'exit' to quit")
     print("  - Type 'set temp X' to change temperature (e.g., 'set temp 0.5')")
     print("  - Type 'set top_p X' to change top_p (e.g., 'set top_p 0.9')")
     print("  - Type 'settings' to view current parameters")
-    print("\n" + "="*60)
+    print("\n" + "="*70)
 
     # Initialize conversation with system message
     conversation_messages = [
@@ -887,6 +1053,20 @@ def main():
             except ValueError:
                 print("\n⚠️  Invalid top_p value. Use: set top_p 0.9")
             continue
+        
+        # Screen with LLM classifier if available
+        if classifier:
+            llm_result = classifier.classify(user_input)
+            category = llm_result['category']
+            
+            if category.startswith('risky-'):
+                risk_type = category.replace('risky-', '')
+                if risk_type in ['temporal', 'future', 'personal']:
+                    print(f"\n⚠️  Warning: LLM classifier flagged this as '{risk_type}' (high epistemic uncertainty)")
+                    print("The answer may be fabricated or hallucinated.")
+                elif risk_type in ['creative', 'opinion', 'random']:
+                    print(f"\n💡 Info: LLM classifier flagged this as '{risk_type}' (high aleatoric uncertainty)")
+                    print("Multiple valid answers exist - output will vary.")
         
         # Add user message to conversation history
         conversation_messages.append({
