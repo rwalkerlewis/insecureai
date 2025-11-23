@@ -736,6 +736,9 @@ def main():
     print("Running analysis on multiple prompts (ordered by increasing uncertainty)...\n")
     print("="*70)
     
+    # Track results for final summary
+    all_results = []
+    
     for idx, prompt in enumerate(test_prompts, 1):
         print("\n" + "#"*70)
         print(f"# TEST {idx}/{len(test_prompts)}")
@@ -992,6 +995,32 @@ def main():
                 
                 status_map = {'A': '✓ HIGH', 'B': '✓ HIGH', 'C': '~ MODERATE', 'D': '⚠ LOW', 'F': '⚠ LOW'}
                 print(f"\n{status_map[overall_grade]} RELIABILITY | Grade: {overall_grade} | Score: {reliability_score:.0f}%")
+                
+                # Store result for summary
+                all_results.append({
+                    'prompt': prompt[:47],
+                    'category': llm_result['category'] if classifier else 'N/A',
+                    'grade': overall_grade,
+                    'score': reliability_score
+                })
+    
+    # Print summary table at the end
+    if all_results:
+        print("\n\n" + "="*85)
+        print("FINAL SUMMARY - CONFIDENCE BREAKDOWN FOR ALL EXECUTED TESTS")
+        print("="*85)
+        print(f"\n{'#':<4} {'Question':<50} {'Category':<17} {'Grade':<7} {'Score'}")
+        print("-" * 85)
+        for idx, r in enumerate(all_results, 1):
+            print(f"{idx:<4} {r['prompt']:<50} {r['category']:<17} {r['grade']:<7} {r['score']:.0f}%")
+        
+        avg_score = np.mean([r['score'] for r in all_results])
+        grades = [r['grade'] for r in all_results]
+        grade_dist = {g: grades.count(g) for g in set(grades)}
+        
+        print("-" * 85)
+        print(f"Tests Executed: {len(all_results)} | Average Score: {avg_score:.1f}% | Grades: {grade_dist}")
+        print("="*85 + "\n")
     
     print("\n" + "="*70)
     print("\nNow entering interactive mode...")
