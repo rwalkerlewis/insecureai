@@ -696,12 +696,27 @@ def analyze_uncertainty(logprobs_data, num_samples=5):
     }
 
 def main():
+    """Main function demonstrating LLM-based classification and uncertainty analysis.
+    
+    This workflow implements a two-stage screening process:
+    1. LLM-based classification to identify risky prompts (temporal, creative, etc.)
+    2. Pattern-based uncertainty detection for maximum epistemic/aleatoric cases
+    3. Full uncertainty analysis for prompts that pass both screens
+    """
     print("=== Module 8: Hackathon Interactive Chat with LLM Classification ===\n")
 
+    # Check if model file exists before proceeding
     check_model_exists()
+    
+    # Initialize the Llama model with:
+    # - n_ctx=2048: Context window size for processing
+    # - verbose=False: Suppress debug output
+    # - logits_all=True: Enable logprobs for uncertainty analysis
     llm = Llama(model_path=str(MODEL_PATH), n_ctx=2048, verbose=False, logits_all=True)
 
-    # Initialize the LLM-based classifier for initial screening
+    # Initialize the LLM-based classifier for initial prompt screening
+    # This classifier uses the same LLM to categorize prompts into safe vs risky categories
+    # Much faster than embedding-based approaches and doesn't require external services
     print("Initializing LLM-based prompt classifier...\n")
     try:
         classifier = LLMClassifier(SCREENING_CATEGORIES, llm)
@@ -711,32 +726,40 @@ def main():
         classifier = None
 
     # Default generation parameters (optimized for speed)
-    temperature = 0.7
-    top_p = 0.95
+    temperature = 0.7  # Controls randomness (0=deterministic, 1=creative)
+    top_p = 0.95  # Nucleus sampling threshold
     max_tokens = 100  # Reduced from 250 for faster generation
     
     # Test prompts - reduced set for faster testing
+    # Each prompt represents a different uncertainty profile:
     test_prompts = [
-        # Low uncertainty - simple factual
+        # Low uncertainty - simple factual question with definitive answer
+        # Expected: safe-factual, high confidence, Grade A-B
         "What is the capital of France?",
         
-        # Moderate uncertainty - requires knowledge
+        # Moderate uncertainty - subjective/opinion-based question
+        # Expected: risky-opinion, warning issued, lower grade (C-D)
         "What is the best programming language?",
         
         # Temporal uncertainty - requires current date/time context
+        # Expected: risky-temporal or risky-future, execution blocked
+        # Tests whether classifier can detect "now" requires current info
         "Who is the president now?",
         
-        # High epistemic uncertainty - unknowable
+        # High epistemic uncertainty - unknowable real-time information
+        # Expected: risky-temporal/future, execution blocked immediately
         "What is the weather in Los Angeles today?",
         
-        # High aleatoric uncertainty - creative
+        # High aleatoric uncertainty - creative task with infinite valid outputs
+        # Expected: risky-creative, blocked by pattern detector
         "Tell me a story about a dragon",
     ]
     
     print("Running analysis on multiple prompts (ordered by increasing uncertainty)...\n")
     print("="*70)
     
-    # Track results for final summary
+    # Track results for final summary table
+    # Stores: prompt, category, grade, reliability score
     all_results = []
     
     for idx, prompt in enumerate(test_prompts, 1):
@@ -749,7 +772,18 @@ def main():
         print(f"Question: {prompt}")
         print("="*70 + "\n")
 
-        # STEP 0A: LLM CLASSIFICATION - Screen with LLM classifier first
+        # ========================================================================
+        # STEP 0A: LLM CLASSIFICATION - First line of defense
+        # ========================================================================
+        # Uses the LLM itself to classify prompts into categories:
+        # - safe-factual: objective, verifiable questions
+        # - safe-instructional: how-to questions
+        # - risky-temporal: requires current/real-time data
+        # - risky-future: asks about future events
+        # - risky-personal: requests private information
+        # - risky-creative: creative writing tasks
+        # - risky-opinion: subjective preferences
+        # - risky-random: random selection requests
         if classifier:
             print("🔍 LLM CLASSIFICATION SCREENING\n")
             llm_result = classifier.classify(prompt)
@@ -758,15 +792,22 @@ def main():
             print(f"Raw Response: {llm_result['raw_response']}\n")
             
             # Determine if we should proceed based on category
+            # Risky categories are split into two types:
+            # 1. High epistemic uncertainty (temporal, future, personal)
+            #    -> STOP execution, model cannot know the answer
+            # 2. High aleatoric uncertainty (creative, opinion, random)
+            #    -> Issue warning but allow execution
             category = llm_result['category']
             proceed_with_generation = True
             warning_message = None
             
             if category.startswith('risky-'):
                 risk_type = category.replace('risky-', '')
+                # Epistemic uncertainty: Model fundamentally cannot know the answer
                 if risk_type in ['temporal', 'future', 'personal']:
                     proceed_with_generation = False
                     warning_message = f"⚠️  High epistemic uncertainty detected via LLM classification ({risk_type})"
+                # Aleatoric uncertainty: Multiple valid answers exist
                 elif risk_type in ['creative', 'opinion', 'random']:
                     warning_message = f"⚠️  High aleatoric uncertainty detected via LLM classification ({risk_type})"
             
@@ -791,7 +832,18 @@ def main():
             
             print("\n" + "="*70)
 
-        # STEP 0B: PATTERN-BASED UNCERTAINTY CHECK
+        # ========================================================================
+        # STEP 0B: PATTERN-BASED UNCERTAINTY CHECK - Second line of defense
+        # ========================================================================
+        # Uses regex patterns to detect questions with maximum uncertainty:
+        # - Real-time info: weather today, current stock prices, latest news
+        # - Future events: predictions, "what will happen"
+        # - Personal data: user's name, address, private information
+        # - Creative tasks: write a story, tell a joke
+        # - Opinions: what's best, favorite, preferences
+        # - Random: pick for me, generate random number
+        #
+        # This complements LLM classification with deterministic pattern matching
         uncertainty_category = categorize_question_uncertainty(prompt)
         
         print(f"📋 Question Category: {uncertainty_category['category']}")
@@ -833,15 +885,26 @@ def main():
             print("\n" + "="*70)
             continue  # Skip to next prompt
         
-        # Question is answerable - proceed with normal flow
-        # STEP 1: Check if model has background knowledge to answer
+        # ========================================================================
+        # STEP 1: KNOWLEDGE AVAILABILITY CHECK
+        # ========================================================================
+        # Question passed both screening stages - now check if model has the
+        # background knowledge needed to answer accurately.
+        # 
+        # The model performs self-assessment by responding:
+        # - YES: Sufficient knowledge
+        # - PARTIAL: Some knowledge but incomplete
+        # - NO: Insufficient knowledge
+        #
+        # Confidence is measured from token probabilities of the self-assessment
         print("🔍 KNOWLEDGE CHECK\n")
         knowledge_check = check_knowledge_availability(llm, prompt)
         
         print(f"Level: {knowledge_check['knowledge_level'].upper()}")
         print(f"Confidence: {knowledge_check['confidence']:.1%}")
         
-        # Grade knowledge availability
+        # Grade knowledge availability on A-F scale
+        # This grade is weighted 2x in the final reliability score
         level = knowledge_check['knowledge_level']
         conf = knowledge_check['confidence']
         
@@ -865,7 +928,17 @@ def main():
         if not knowledge_check['has_knowledge']:
             print("\n⚠️  WARNING: Insufficient knowledge - treat answer with caution\n")
         
-        # STEP 2: Generate response with logprobs to get probability information
+        # ========================================================================
+        # STEP 2: GENERATE ANSWER WITH LOGPROBS
+        # ========================================================================
+        # Generate the actual answer while capturing detailed probability info:
+        # - logprobs=True: Get log probabilities for each token
+        # - top_logprobs=5: Track top 5 alternative tokens at each position
+        #
+        # This data enables uncertainty quantification by analyzing:
+        # - Token probability distribution (how confident per token)
+        # - Alternative choices (what else model considered)
+        # - Entropy (spread of probability mass)
         print("\n" + "="*70)
         print("ANSWER")
         print("="*70 + "\n")
@@ -878,11 +951,11 @@ def main():
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
-            logprobs=True,
-            top_logprobs=5
+            logprobs=True,  # Enable probability tracking
+            top_logprobs=5  # Track top 5 alternatives per token
         )
 
-        # Extract response and probability information
+        # Extract response text and probability information
         assistant_response = response['choices'][0]['message']['content']
         
         print(f"Assistant: {assistant_response}\n")
@@ -907,11 +980,33 @@ def main():
                     print(f"CONFIDENCE: Avg {avg_prob*100:.1f}% | Min {min_prob*100:.1f}% | Max {max_prob*100:.1f}%")
                     print("="*70)
                 
+                # ================================================================
+                # STEP 3: UNCERTAINTY DECOMPOSITION
+                # ================================================================
+                # Analyze two types of uncertainty from token probabilities:
+                # 
+                # 1. ALEATORIC UNCERTAINTY (Inherent randomness):
+                #    Measured by entropy of token distributions
+                #    High when multiple valid answers exist (creative tasks)
+                #
+                # 2. EPISTEMIC UNCERTAINTY (Knowledge gaps):
+                #    Measured by variance in top token probabilities
+                #    High when model is uncertain which answer is correct
                 uncertainty_analysis = analyze_uncertainty(logprobs_data)
                 
                 if uncertainty_analysis:
                     print("\n📊 UNCERTAINTY ANALYSIS\n")
                     
+                    # ============================================================
+                    # STEP 4: CATEGORIZE UNCERTAINTY TYPES
+                    # ============================================================
+                    # Use LLM to analyze the Q&A pair and identify specific
+                    # sources of uncertainty:
+                    # 
+                    # Epistemic: Temporal, Domain-specific, Factual gaps,
+                    #            Contextual, Ambiguous terminology
+                    # Aleatoric: Linguistic ambiguity, Under-specification,
+                    #            Subjective, Creative freedom, Probabilistic
                     uncertainty_categories = categorize_uncertainty_types(llm, prompt, assistant_response)
                     
                     def show_categories(title, cats):
@@ -945,11 +1040,25 @@ def main():
                 else:
                     print("✓ None needed")
                 
+                # ============================================================
+                # STEP 5: MULTI-FACTOR CONFIDENCE BREAKDOWN
+                # ============================================================
+                # Grade each component on A-F scale and combine into overall
+                # reliability assessment:
+                #
+                # 0. Knowledge: Model's self-assessed background knowledge
+                # 1. Avg Prob: Mean token probability (higher = more confident)
+                # 2. Consistency: Token variance (lower = more consistent)
+                # 3. Aleatoric: Entropy-based randomness (lower = less random)
+                # 4. Epistemic: Knowledge uncertainty (lower = more certain)
+                # 5. Prob Gap: Margin between top choices (higher = clearer)
+                # 6. Min Prob: Lowest token probability (higher = no weak spots)
                 print("\n" + "="*70)
                 print("CONFIDENCE BREAKDOWN")
                 print("="*70)
                 
                 token_variance = np.var(token_probs)
+                # Grade each component (A=best, F=worst)
                 aleatoric_grade, aleatoric_desc = grade_component(uncertainty_analysis['aleatoric_mean'], 0.5, 2.0)
                 epistemic_grade, epistemic_desc = grade_component(uncertainty_analysis['epistemic_mean'], 0.01, 0.08)
                 prob_gap_grade, prob_gap_desc = grade_component(uncertainty_analysis['avg_prob_gap'], 0.3, 0.1, reverse=True)
@@ -965,11 +1074,17 @@ def main():
                 print(f"5️⃣  Prob Gap: {prob_gap_grade} | {uncertainty_analysis['avg_prob_gap']:.3f}")
                 print(f"6️⃣  Min Prob: {min_grade} | {min_prob:.3f} ({min_prob*100:.1f}%)")
                 
+                # Convert letter grades to numeric scores for aggregation
                 grades_map = {'A': 4, 'B': 3, 'C': 2, 'D': 1, 'F': 0}
                 all_grades = [knowledge_grade, avg_prob_grade, var_grade, aleatoric_grade, epistemic_grade, prob_gap_grade, min_grade]
                 
+                # Calculate weighted score (knowledge counts 2x due to importance)
+                # Formula: (knowledge*2 + sum of other 6 grades) / 8
+                # Range: 0.0 (all F) to 4.0 (all A)
                 weighted_score = (grades_map[knowledge_grade] * 2 + sum(grades_map[g] for g in all_grades[1:])) / 8.0
                 
+                # Convert weighted score back to letter grade
+                # 3.5-4.0 = A, 2.5-3.5 = B, 1.5-2.5 = C, 0.5-1.5 = D, <0.5 = F
                 thresholds = [(3.5, 'A'), (2.5, 'B'), (1.5, 'C'), (0.5, 'D')]
                 overall_grade = next((g for t, g in thresholds if weighted_score >= t), 'F')
                 
@@ -987,16 +1102,26 @@ def main():
                         alts = ', '.join([f"{repr(t)} {p*100:.0f}%" for t, p in d['alternatives'][:2]])
                         print(f"   {i}. {repr(d['token'])} @ {d['top_prob']*100:.0f}% | Entropy {d['entropy']:.3f} | Alts: {alts}")
                 
+                # ============================================================
+                # STEP 6: FINAL RELIABILITY SCORE
+                # ============================================================
+                # Calculate 0-100% reliability score from total uncertainty
+                # Lower uncertainty = higher reliability
                 reliability_score = (1 - min(uncertainty_analysis['total_uncertainty']/5, 1)) * 100
                 
+                # Apply penalties based on knowledge availability
+                # Insufficient knowledge drastically reduces reliability (70% penalty)
+                # Partial knowledge moderately reduces reliability (30% penalty)
+                # Low confidence in self-assessment reduces reliability (20% penalty)
                 if level == 'insufficient': reliability_score *= 0.3
                 elif level == 'partial': reliability_score *= 0.7
                 elif conf < 0.5: reliability_score *= 0.8
                 
+                # Display final verdict with clear visual indicators
                 status_map = {'A': '✓ HIGH', 'B': '✓ HIGH', 'C': '~ MODERATE', 'D': '⚠ LOW', 'F': '⚠ LOW'}
                 print(f"\n{status_map[overall_grade]} RELIABILITY | Grade: {overall_grade} | Score: {reliability_score:.0f}%")
                 
-                # Store result for summary
+                # Store result for summary table at end
                 all_results.append({
                     'prompt': prompt[:47],
                     'category': llm_result['category'] if classifier else 'N/A',
@@ -1004,7 +1129,14 @@ def main():
                     'score': reliability_score
                 })
     
-    # Print summary table at the end
+    # ========================================================================
+    # FINAL SUMMARY TABLE
+    # ========================================================================
+    # Display aggregated results for all prompts that were fully executed
+    # (i.e., passed both screening stages and generated answers)
+    #
+    # Shows: test number, question, LLM category, final grade, reliability %
+    # Plus: aggregate statistics (avg score, grade distribution)
     if all_results:
         print("\n\n" + "="*85)
         print("FINAL SUMMARY - CONFIDENCE BREAKDOWN FOR ALL EXECUTED TESTS")
@@ -1014,6 +1146,7 @@ def main():
         for idx, r in enumerate(all_results, 1):
             print(f"{idx:<4} {r['prompt']:<50} {r['category']:<17} {r['grade']:<7} {r['score']:.0f}%")
         
+        # Calculate aggregate statistics
         avg_score = np.mean([r['score'] for r in all_results])
         grades = [r['grade'] for r in all_results]
         grade_dist = {g: grades.count(g) for g in set(grades)}
@@ -1031,7 +1164,18 @@ def main():
     print("  - Type 'settings' to view current parameters")
     print("\n" + "="*70)
 
-    # Initialize conversation with system message
+    # ========================================================================
+    # INTERACTIVE CHAT MODE
+    # ========================================================================
+    # Enter conversation loop where user can:
+    # - Ask questions (screened by LLM classifier)
+    # - Adjust generation parameters (temperature, top_p)
+    # - View current settings
+    # 
+    # Each user input is screened by the LLM classifier to warn about
+    # temporal, creative, or opinion-based questions before generating answers
+    
+    # Initialize conversation history with system message
     conversation_messages = [
         {"role": "system", "content": "You are a helpful AI assistant. Provide clear, concise, and accurate answers."}
     ]
@@ -1083,16 +1227,20 @@ def main():
                 print("\n⚠️  Invalid top_p value. Use: set top_p 0.9")
             continue
         
-        # Screen with LLM classifier if available
+        # Screen user input with LLM classifier to provide real-time warnings
+        # Unlike batch mode, we don't block execution in interactive mode
+        # but we do warn users about potential issues
         if classifier:
             llm_result = classifier.classify(user_input)
             category = llm_result['category']
             
             if category.startswith('risky-'):
                 risk_type = category.replace('risky-', '')
+                # Warn about epistemic uncertainty (model cannot know the answer)
                 if risk_type in ['temporal', 'future', 'personal']:
                     print(f"\n⚠️  Warning: LLM classifier flagged this as '{risk_type}' (high epistemic uncertainty)")
                     print("The answer may be fabricated or hallucinated.")
+                # Inform about aleatoric uncertainty (multiple valid answers)
                 elif risk_type in ['creative', 'opinion', 'random']:
                     print(f"\n💡 Info: LLM classifier flagged this as '{risk_type}' (high aleatoric uncertainty)")
                     print("Multiple valid answers exist - output will vary.")
